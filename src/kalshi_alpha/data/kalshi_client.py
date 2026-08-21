@@ -33,8 +33,9 @@ import base64
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ import httpx
 
 from kalshi_alpha.config import Settings
 from kalshi_alpha.logging_setup import get_logger
-from kalshi_alpha.types import MarketMeta, OrderBook, Side, Trade
+from kalshi_alpha.types import PAYOUT, MarketMeta, OrderBook, Side, Trade
 
 log = get_logger(__name__)
 
@@ -243,7 +244,9 @@ class KalshiClient:
         payload = await self.request(
             "GET", f"/markets/{ticker}/orderbook", params={"depth": depth}
         )
-        return parse_orderbook(ticker, payload.get("orderbook", payload), time.time())
+        # parse_orderbook unwraps the envelope itself, so hand it the whole
+        # response rather than guessing which key the current API version uses.
+        return parse_orderbook(ticker, payload, time.time())
 
     async def get_trades(self, ticker: str, limit: int = 200) -> list[Trade]:
         payload = await self.request(
@@ -322,27 +325,149 @@ class KalshiClient:
 # --------------------------------------------------------------------------
 # parsing
 # --------------------------------------------------------------------------
-def parse_orderbook(ticker: str, payload: dict[str, Any], ts: float) -> OrderBook:
+def dollars_to_cents(value: Any) -> int | None:
+    """Convert a decimal dollar amount (``"0.0100"`` or ``0.01``) to whole cents.
+
+    The exchange serialises prices as fixed-point *strings* in dollars. Parsing
+    them as floats and rounding is safe here only because the grid is whole
+    cents; ``round`` rather than ``int`` because ``0.0300`` can land on
+    ``0.029999...`` in binary floating point and truncation would silently shift
+    the entire book down a cent.
+    """
+    if value is None:
+        return None
+    try:
+        return int(round(float(value) * 100.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_size(value: Any) -> int:
+    """Convert a fixed-point size (``"677.52"``) to whole contracts.
+
+    Kalshi now reports fractional positions. This package models integer
+    contracts, so sizes are **floored**: understating available depth makes an
+    arbitrage look smaller than it is, which costs opportunity; overstating it
+    makes a leg unfillable, which costs money.
+    """
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_timestamp(payload: Mapping[str, Any], *keys: str) -> float:
+    """Read the first present timestamp, accepting epoch numbers or ISO-8601."""
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            # ``Z`` is valid ISO-8601 but fromisoformat only learned it in 3.11.
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return time.time()
+
+
+def _levels(payload: Mapping[str, Any], dollar_key: str, cent_key: str) -> list[tuple[int, int]]:
+    """Read one bid ladder, accepting either the dollar or the legacy cent form.
+
+    Disambiguation is by **key**, not by inspecting the values: ``40`` is a
+    valid price in both encodings (40 cents versus $40) and guessing from the
+    magnitude would be a coin flip on exactly the tail prices this package
+    cares most about.
+    """
+    raw = payload.get(dollar_key)
+    if raw:
+        out = []
+        for price, size in raw:
+            cents = dollars_to_cents(price)
+            qty = parse_size(size)
+            if cents is not None and 0 < cents < PAYOUT and qty > 0:
+                out.append((cents, qty))
+        return out
+
+    raw = payload.get(cent_key)
+    if not raw:
+        return []
+    out = []
+    for price, size in raw:
+        try:
+            cents, qty = int(price), int(size)
+        except (TypeError, ValueError):
+            continue
+        if 0 < cents < PAYOUT and qty > 0:
+            out.append((cents, qty))
+    return out
+
+
+def parse_orderbook(ticker: str, payload: Mapping[str, Any], ts: float) -> OrderBook:
     """Build an :class:`OrderBook` from the exchange's two bid arrays.
 
-    The API returns ``yes`` and ``no`` as lists of ``[price, size]`` pairs, both
-    of which are *bid* books -- see the module docstring in
-    :mod:`kalshi_alpha.types` for why that matters.
+    Both ``yes`` and ``no`` are *bid* books -- see the module docstring in
+    :mod:`kalshi_alpha.types` for why that distinction drives everything.
+
+    Two wire formats are accepted. The current API nests the ladders under
+    ``orderbook_fp`` and names them ``yes_dollars`` / ``no_dollars``, with
+    fixed-point decimal strings for both price and size; older responses used
+    ``yes`` / ``no`` with integer cents. Supporting both is not
+    future-proofing for its own sake -- the demo and production environments
+    have been observed on different versions, and a parser that silently
+    returns an empty book produces a system that finds no arbitrage anywhere
+    and looks like it is working.
     """
-    yes = [(int(p), int(s)) for p, s in (payload.get("yes") or []) if s]
-    no = [(int(p), int(s)) for p, s in (payload.get("no") or []) if s]
+    book = payload.get("orderbook_fp") or payload.get("orderbook") or payload
+    if not isinstance(book, Mapping):
+        book = {}
+    yes = _levels(book, "yes_dollars", "yes")
+    no = _levels(book, "no_dollars", "no")
     return OrderBook.from_levels(ticker, ts, yes, no)
 
 
-def parse_trade(payload: dict[str, Any]) -> Trade:
+def parse_trade(payload: Mapping[str, Any]) -> Trade:
+    """Parse one print, accepting dollar-string or integer-cent encodings."""
     taker = str(payload.get("taker_side", "yes")).lower()
+    price = dollars_to_cents(payload.get("yes_price_dollars"))
+    if price is None:
+        try:
+            price = int(payload.get("yes_price", 0))
+        except (TypeError, ValueError):
+            price = 0
+
+    size_raw = payload.get("count_fp", payload.get("count", 0))
     return Trade(
         ticker=str(payload.get("ticker", "")),
-        ts=float(payload.get("created_time_ts", payload.get("ts", time.time()))),
-        price=int(payload.get("yes_price", 0)),
-        size=int(payload.get("count", 0)),
+        ts=parse_timestamp(payload, "created_time_ts", "created_time", "ts"),
+        price=int(price or 0),
+        size=parse_size(size_raw),
         taker_side=Side.YES if taker == "yes" else Side.NO,
     )
+
+
+def parse_quote(payload: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Top-of-book ``(yes_bid, yes_ask)`` in cents, straight off a market payload.
+
+    A cheap alternative to a full orderbook call when scanning many markets:
+    the market list endpoint already carries the touch, so a coarse pre-filter
+    can run on one request instead of hundreds.
+    """
+    bid = dollars_to_cents(payload.get("yes_bid_dollars"))
+    ask = dollars_to_cents(payload.get("yes_ask_dollars"))
+    if bid is None and "yes_bid" in payload:
+        bid = int(payload["yes_bid"])
+    if ask is None and "yes_ask" in payload:
+        ask = int(payload["yes_ask"])
+    return bid, ask
 
 
 def parse_market_meta(payload: dict[str, Any]) -> MarketMeta:
@@ -379,7 +504,9 @@ def parse_market_meta(payload: dict[str, Any]) -> MarketMeta:
         strike=strike,
         strike_type=strike_type,
         strike_upper=upper,
-        close_ts=_as_float(payload.get("close_time_ts")),
+        close_ts=parse_timestamp(payload, "close_time_ts", "close_time")
+        if payload.get("close_time_ts") or payload.get("close_time")
+        else None,
         category=str(payload.get("category", "")),
     )
 

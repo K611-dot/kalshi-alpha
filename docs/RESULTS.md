@@ -148,7 +148,38 @@ Kyle's lambda is what caps executable size: an arbitrage needing more contracts 
 
 ---
 
-## 5. What would change on live data
+## 5. Live market check
+
+`kalshi-alpha scan --event KXGDPYEAR-36`, run unauthenticated against production on
+2026-08-21. Fourteen bucket markets partitioning 2036 GDP growth, so exactly one settles
+YES and the fair prices must sum to $1.
+
+| | |
+|:--|--:|
+| markets, all two-sided | 14 |
+| sum of best **asks** | **123c** |
+| sum of best **bids** | **80c** |
+| no-arbitrage band | **43c wide** |
+| arbitrage found after fees | **0** |
+
+Buying every outcome costs $1.23 for a guaranteed $1; selling every outcome pays $0.80 to
+assume a $1 liability. Both are far outside the band, so the scanner correctly reports
+nothing.
+
+This is the single most useful sanity check in the repository, because it answers the
+question the simulator cannot: **how much room is there in practice?** The answer is that
+the binding constraint is not fee-versus-dislocation at all — quoted spreads on a
+14-outcome event are roughly an order of magnitude wider than the 3.5c fee hurdle. Real
+model-free arbitrage requires either a genuinely stale quote or a second venue, which is
+what `detect_cross_venue` exists for.
+
+Depth is substantial (several markets show $2,000-$5,000 of resting notional), so this is
+not a case of an illiquid book quoting wide. The market is liquid and still 43 cents wide
+across the round.
+
+---
+
+## 6. What would change on live data
 
 The simulator is a GBM with digital payoffs. Real event contracts have fat tails, regime changes around resolution criteria, and settlement disputes that no diffusion captures. Specifically:
 

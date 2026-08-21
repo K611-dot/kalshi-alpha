@@ -145,11 +145,25 @@ kalshi-alpha scan --dislocate 12       # inject a 12c violation and detect it
 kalshi-alpha diffusion --out artifacts
 kalshi-alpha backtest --strategy all
 kalshi-alpha calibrate --bias 0.85
-kalshi-alpha fetch --event CPI         # live snapshots (read-only, needs credentials)
+kalshi-alpha scan --event KXGDPYEAR-36  # scan REAL live markets (no API key needed)
+kalshi-alpha fetch --event KXGDPYEAR-36 # pull live snapshots to parquet
 kalshi-alpha config
 ```
 
-Live mode is opt-in and read-only by default. The package defaults to `offline`, so importing it can never reach the network. Credentials come from the environment (see `.env.example`); the private key is never logged.
+**No API key is required.** Kalshi serves market data publicly, so `scan --event` and `fetch` work unauthenticated. Credentials are only needed for account endpoints (balance, positions) and order placement — and the client refuses to place an order without them. The package defaults to `offline` mode, so importing it can never reach the network.
+
+### Live scan against a real event
+
+```
+KXGDPYEAR-36: 14 markets, 14 two-sided (env=prod)
+  KXGDPYEAR-36-T6.0      gt       bid=  6 ask=  7
+  KXGDPYEAR-36-B5.3      between  bid=  1 ask=  2
+  ...
+no-arbitrage band across 14 outcomes: [80c, 123c] against a fair value of 100c -> 43c wide
+found 0 opportunities
+```
+
+The bucket markets of an event partition the outcome space, so the fair prices must sum to $1. On this real event you would pay **$1.23** for a guaranteed $1, or receive **$0.80** to take on a $1 liability. That 43-cent band — against a ~3.5c fee hurdle — is the honest reason model-free arbitrage on this exchange is rare: not that it is hard to detect, but that quoted spreads are an order of magnitude wider than any dislocation worth chasing.
 
 ---
 

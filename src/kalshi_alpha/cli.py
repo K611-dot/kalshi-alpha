@@ -49,7 +49,7 @@ from kalshi_alpha.microstructure.features import feature_frame, trade_frame
 from kalshi_alpha.microstructure.impact import liquidity_report
 from kalshi_alpha.probability.calibration import calibration_report
 from kalshi_alpha.report.html import Report, line_chart, scatter_chart
-from kalshi_alpha.types import PAYOUT
+from kalshi_alpha.types import PAYOUT, EventGroup
 
 
 # --------------------------------------------------------------------------
@@ -617,7 +617,79 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def scan_live(event_ticker: str, env: str = "prod", depth: int = 10) -> int:
+    """Pull a real event's books and scan them for arbitrage.
+
+    Read-only and unauthenticated: Kalshi serves market data without
+    credentials, so this needs no API key. Nothing here can place an order --
+    :mod:`kalshi_alpha.execution` is not even imported.
+
+    The bucket markets of a single event partition the outcome space, so
+    exactly one settles YES and the fair prices must sum to $1. The gap between
+    the summed bids and the summed asks is the event's no-arbitrage band, and
+    printing it is the point: on real markets that band is far wider than any
+    fee hurdle, which is the honest explanation for why model-free arbitrage is
+    rare rather than merely hard to find.
+    """
+    import asyncio
+
+    from kalshi_alpha.data.kalshi_client import KalshiClient, parse_market_meta
+
+    settings = load_settings(env=env)
+
+    async def pull():
+        async with KalshiClient(settings) as client:
+            markets = await client.get_markets(event_ticker=event_ticker)
+            if not markets:
+                return [], {}
+            metas = [parse_market_meta(m) for m in markets]
+            books = await client.snapshot([m.ticker for m in metas], depth=depth)
+            return metas, books
+
+    metas, books = asyncio.run(pull())
+    if not metas:
+        print(f"no markets found for event {event_ticker!r} on env={env}", file=sys.stderr)
+        print("hint: the demo environment lists different markets than production; "
+              "pass --env prod for real events.", file=sys.stderr)
+        return 1
+
+    two_sided = {t: b for t, b in books.items() if b.is_two_sided}
+    print(f"{event_ticker}: {len(books)} markets, {len(two_sided)} two-sided (env={env})")
+    for meta in metas:
+        book = books.get(meta.ticker)
+        if book is None:
+            continue
+        print(
+            f"  {meta.ticker:34s} {str(meta.strike_type or '-'):8s} "
+            f"bid={str(book.best_yes_bid):>4s} ask={str(book.best_yes_ask):>4s} "
+            f"depth={book.notional_depth():>7d}c"
+        )
+
+    quoted = [b for b in two_sided.values() if b.best_yes_bid and b.best_yes_ask]
+    if len(quoted) >= 2:
+        sum_bid = sum(b.best_yes_bid for b in quoted if b.best_yes_bid)
+        sum_ask = sum(b.best_yes_ask for b in quoted if b.best_yes_ask)
+        print(
+            f"\nno-arbitrage band across {len(quoted)} outcomes: "
+            f"[{sum_bid}c, {sum_ask}c] against a fair value of 100c "
+            f"-> {sum_ask - sum_bid}c wide"
+        )
+
+    group = EventGroup(event_ticker, tuple(two_sided), exhaustive=True)
+    result = ArbEngine(settings).scan(two_sided, groups=[group])
+    print("\n" + result.summary())
+    for opp in result.opportunities:
+        print(opp.describe())
+        print(f"    {opp.detail}")
+    if not result.opportunities:
+        print("no arbitrage after fees on this event")
+    return 0
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
+    if args.event:
+        return scan_live(args.event, args.env, args.depth)
+
     settings = load_settings()
     sim = _sim(steps=args.steps)
     books = sim.final_books()
@@ -731,11 +803,13 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     from kalshi_alpha.data.kalshi_client import KalshiClient, parse_market_meta
     from kalshi_alpha.data.store import TickStore
 
-    settings = load_settings(mode="live")
+    settings = load_settings(mode="live", env=args.env)
     if not settings.has_credentials:
+        # Not an error: market data is public. Credentials are only needed for
+        # balance, positions and order placement, none of which this does.
         print(
-            "no credentials found. Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH "
-            "(see .env.example). Public endpoints may still work unauthenticated.",
+            "running unauthenticated -- market data is public on Kalshi. "
+            "Credentials (see .env.example) are only needed for account endpoints.",
             file=sys.stderr,
         )
 
@@ -743,7 +817,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         async with KalshiClient(settings) as client:
             markets = await client.get_markets(event_ticker=args.event)
             if not markets:
-                print(f"no markets found for event {args.event!r}", file=sys.stderr)
+                print(f"no markets found for event {args.event!r} on env={args.env}",
+                      file=sys.stderr)
+                print("hint: the demo environment lists different markets than "
+                      "production; pass --env prod for real events.", file=sys.stderr)
                 return 1
             tickers = [m["ticker"] for m in markets][: args.limit]
             books = await client.snapshot(tickers, depth=args.depth)
@@ -794,7 +871,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--half-life", type=float, default=150.0)
     p.set_defaults(func=cmd_demo)
 
-    p = sub.add_parser("scan", help="scan for arbitrage")
+    p = sub.add_parser("scan", help="scan for arbitrage, offline or against live markets")
+    p.add_argument("--event", default="",
+                   help="scan a real event's live books (read-only, no API key needed)")
+    p.add_argument("--env", default="prod", choices=["prod", "demo"],
+                   help="which Kalshi environment to read from (default: prod)")
+    p.add_argument("--depth", type=int, default=10)
     p.add_argument("--offline", action="store_true", help="use the simulator (default)")
     p.add_argument("--steps", type=int, default=800)
     p.add_argument("--dislocate", type=int, default=0,
@@ -821,6 +903,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fetch", help="pull live book snapshots (read-only)")
     p.add_argument("--event", required=True)
+    p.add_argument("--env", default="prod", choices=["prod", "demo"],
+                   help="which Kalshi environment to read from (default: prod)")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--depth", type=int, default=10)
     p.set_defaults(func=cmd_fetch)
