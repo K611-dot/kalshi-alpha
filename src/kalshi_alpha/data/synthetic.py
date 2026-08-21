@@ -448,11 +448,16 @@ def simulate_two_venue(
         a[t] = a[t - 1] + ea[t] + kappa_a * (efficient[t - 1] - a[t - 1])
         b[t] = b[t - 1] + eb[t] + kappa_b * (efficient[t - 1] - b[t - 1])
 
-    a = a + rng.normal(0.0, noise, size=n)
-    b = b + rng.normal(0.0, noise, size=n)
+    # The venues' latent paths are unobservable; what an estimator sees is the
+    # path plus quoting noise. Keeping them as separate names makes that
+    # distinction explicit rather than shadowing the latent series.
+    observed_a = a + rng.normal(0.0, noise, size=n)
+    observed_b = b + rng.normal(0.0, noise, size=n)
     times = start_ts + np.arange(n) * dt_s
     share_a = sigma_a**2 / (sigma_a**2 + sigma_b**2)
-    return TwoVenueSim(times, efficient, a, b, float(share_a), kappa_a, kappa_b)
+    return TwoVenueSim(
+        times, efficient, observed_a, observed_b, float(share_a), kappa_a, kappa_b
+    )
 
 
 def simulate_calibration_sample(
