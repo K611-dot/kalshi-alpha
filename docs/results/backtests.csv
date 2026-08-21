@@ -1,0 +1,6 @@
+strategy,pnl_usd,trades,contracts,fees_usd,sharpe,max_dd_usd,hit_rate,deflated_sr,fill_rate
+ladder_arb,0.0,0,0,0.0,,0.0,,,0.0
+coherence,0.0,0,0,0.0,,0.0,,,0.0
+microprice,0.0,0,0,0.0,,0.0,,,0.0
+drift,19.15,7,175,2.35,102.44430179297397,-3.15,0.5170278637770898,0.742964859128965,0.875
+ladder_arb_stressed,386.7,87,8700,95.3,20.125795145283334,-565.22,0.44649446494464945,0.22739141645030975,0.87

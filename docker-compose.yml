@@ -1,0 +1,17 @@
+services:
+  research:
+    build: .
+    image: kalshi-alpha:latest
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    environment:
+      KALSHI_ALPHA_MODE: offline
+      KALSHI_ALPHA_LOG_LEVEL: INFO
+    command: ["demo", "--out", "artifacts"]
+
+  tests:
+    build: .
+    image: kalshi-alpha:latest
+    entrypoint: ["python", "-m", "pytest"]
+    command: ["-q"]
