@@ -48,6 +48,14 @@ So the package ships a generator where the answer is known:
 
 Calibration: injected Platt distortion `a = 0.850`, recovered `0.883`.
 
+![Estimated versus true half-life](docs/figures/halflife_recovery.png)
+
+A market quote is a probability forecast, so it is scored like one. Murphy's decomposition splits the Brier score into the part that is tradeable (miscalibration) and the parts that are not:
+
+![Reliability curve and Murphy decomposition](docs/figures/calibration.png)
+
+Reliability is **423x smaller** than the irreducible variance. That ratio is the whole story of why forecasting edge in prediction markets is thin.
+
 ---
 
 ## Headline result: the fee curve decides where arbitrage exists
@@ -65,6 +73,8 @@ That single fact determines where model-free edge is capturable. Build a ladder 
 | 90c | 2c | 1.26c |
 
 The empirical threshold matches the closed-form prediction, rounded up to the one-cent grid. **A violation that is already tradeable at 5c needs to be four times larger at even money.** That is structural, not market-specific, and it says exactly where to point a scanner.
+
+![Minimum tradeable violation by price level](docs/figures/fee_threshold.png)
 
 ---
 
@@ -90,6 +100,8 @@ Every reported opportunity is validated state by state: it is only an arbitrage 
 
 - **Price discovery** — VECM with the cointegrating vector fixed at `(1, −1)`, then Hasbrouck information shares with **exact Cholesky-ordering bounds** (never a single number — the bounds are widest precisely when both venues are fast, which is when the question matters most) and Gonzalo–Granger component shares. ADF on the spread licenses the interpretation.
 - **Half-life of adjustment** — three estimators that fail differently: non-parametric adjustment profile, weighted exponential decay, and AR(1) on the gap. When a leading series is available, the **spread-based** estimator wins outright, because it is the only one that does not assume the efficient price stops moving after the release.
+![Estimated half-life versus estimation window](docs/figures/window_scan.png)
+
 - **Window selection** — the single-series estimators are only identified when the half-life is short relative to the horizon over which residual volatility is stable. `window_scan` exposes the plateau-then-runaway curve, and `select_window` locates the knee. When no plateau exists the result is returned as **unidentified** rather than dressed up as an answer.
 - **Lead–lag** — Hayashi–Yoshida on asynchronous data, avoiding the Epps effect that makes grid-sampled correlation collapse at exactly the horizon you care about. Scanning the clock shift traces out the propagation delay.
 - **Event study** — event-relative alignment, drift-adjusted CAAR, cross-sectional t-stats, and a **placebo distribution** from randomly-timed pseudo-events, because a parametric t-stat on eight fat-tailed events is not credible.
@@ -140,6 +152,7 @@ The `drift` Sharpe of 102 is an artefact of annualising a 5-second bar over a si
 
 ```bash
 kalshi-alpha demo                      # full pipeline -> artifacts/report.html
+python scripts/make_figures.py         # regenerate every chart above
 kalshi-alpha validate                  # score estimators against ground truth
 kalshi-alpha scan --dislocate 12       # inject a 12c violation and detect it
 kalshi-alpha diffusion --out artifacts
